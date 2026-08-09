@@ -14,6 +14,8 @@ export interface ReasoningConfig {
   provider?: string;
   disableThinking?: boolean;
   language?: string;
+  /** Use Chat Completions when a deterministic system-message transform is required. */
+  preferChatCompletions?: boolean;
   requireCompleteOutput?: boolean;
   requiresAgent?: boolean;
 }

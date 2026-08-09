@@ -157,7 +157,7 @@ export const openaiProvider: InferenceProvider = {
     const dialect = detectEndpointDialect(openAiBase);
     // OpenRouter and known dialect hosts speak Chat Completions only — no /responses probe needed.
     let endpointCandidates: Array<{ url: string; type: "responses" | "chat" }>;
-    if (isOpenRouter || dialect) {
+    if (isOpenRouter || dialect || config.preferChatCompletions) {
       endpointCandidates = [{ url: buildApiUrl(openAiBase, "/chat/completions"), type: "chat" }];
     } else {
       await detectServerType(openAiBase);
@@ -170,6 +170,7 @@ export const openaiProvider: InferenceProvider = {
       isCustomEndpoint,
       candidates: endpointCandidates.map((candidate) => candidate.url),
       preference: readStoredPreference(openAiBase) || null,
+      preferChatCompletions: !!config.preferChatCompletions,
     });
 
     if (isCustomEndpoint) {

@@ -145,6 +145,12 @@ async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<s
     maxTokens: 256,
     disableThinking: true,
     language: target,
+    // The Responses endpoint may return no output text for an otherwise
+    // successful request, and its generic fallback is the source text. That
+    // looks like a Korean "translation" in the English column. Chat
+    // Completions reliably preserves this system-message-only transform.
+    preferChatCompletions: true,
+    requireCompleteOutput: true,
     // Meeting columns have a fixed contract. Do not use the editable general
     // translation prompt here: it may omit the target placeholder and let the
     // model return a cleaned copy of the source in the opposite column.
