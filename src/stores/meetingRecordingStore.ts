@@ -19,7 +19,10 @@ import {
   MAX_SPEAKER_COUNT,
 } from "../constants/speakerDetection.json";
 import logger from "../utils/logger";
-import { getMeetingTranslationTarget } from "../helpers/meetingBilingualTranslation";
+import {
+  getMeetingTranslationTarget,
+  isMeetingTranslationInTargetLanguage,
+} from "../helpers/meetingBilingualTranslation";
 import { serializeTranscriptSegments } from "../utils/transcriptSpeakerState";
 import { isTranscriptionContextAllowed } from "./policyRules";
 import { usePolicyStore } from "./policyStore";
@@ -118,19 +121,14 @@ async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<s
   const model = settings.translationModel || (isCloud ? "auto" : "");
   if (!model && !isSelfHosted) return null;
 
-  const [
-    { default: ReasoningService },
-    { resolvePrompt },
-    { getDictionaryHintWords },
-    { getLanguageLabel },
-  ] = await Promise.all([
+  const [{ default: ReasoningService }, { getDictionaryHintWords }] = await Promise.all([
     import("../services/ReasoningService"),
-    import("../config/prompts"),
     import("../utils/snippets"),
-    import("../utils/languageSupport"),
   ]);
   const target = getMeetingTranslationTarget(segment.text);
-  return ReasoningService.processText(segment.text, model, null, {
+  const targetLabel = target === "en" ? "English" : "Korean";
+  const dictionary = getDictionaryHintWords(settings);
+  const translatedText = await ReasoningService.processText(segment.text, model, null, {
     provider,
     lanUrl: isSelfHosted ? settings.translationRemoteUrl : undefined,
     baseUrl:
@@ -147,15 +145,27 @@ async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<s
     maxTokens: 256,
     disableThinking: true,
     language: target,
-    // Uses the shared dictionary hint list, so Korean and English names are
-    // protected in both the source transcription and its translated companion.
-    systemPrompt: resolvePrompt("translate", {
-      agentName: null,
-      targetLanguageLabel: getLanguageLabel(target),
-      customDictionary: getDictionaryHintWords(settings),
-      uiLanguage: settings.uiLanguage,
-    }),
+    // Meeting columns have a fixed contract. Do not use the editable general
+    // translation prompt here: it may omit the target placeholder and let the
+    // model return a cleaned copy of the source in the opposite column.
+    systemPrompt: [
+      "You are a live Korean-English meeting interpreter.",
+      `Translate the user's input into ${targetLabel}.`,
+      `Return only the ${targetLabel} translation. Do not repeat, summarize, or explain the source text.`,
+      target === "en"
+        ? "Your output must not contain Korean sentences; transliterate Korean names when needed."
+        : "Your output must be written in Korean; translate English names only when a natural Korean form exists.",
+      dictionary.length
+        ? `Preserve these meeting terms and names accurately: ${dictionary.join(", ")}.`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
   });
+  if (!isMeetingTranslationInTargetLanguage(translatedText, target)) {
+    throw new Error(`Meeting translation did not return ${targetLabel}`);
+  }
+  return translatedText;
 }
 
 export function translateMeetingSegment(segment: TranscriptSegment): Promise<string | null> {
