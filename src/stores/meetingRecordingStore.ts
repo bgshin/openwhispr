@@ -98,6 +98,7 @@ const MEETING_MIC_PRIMARY_AUDIO_CONSTRAINTS = {
 
 const SPEAKER_IDENTIFICATION_RETENTION_MS = 30_000;
 const SYSTEM_SPEAKER_CARRY_FORWARD_MS = 8_000;
+const meetingTranslationJobs = new Map<string, Promise<string | null>>();
 
 const buildTranscriptText = (segments: TranscriptSegment[]) =>
   segments
@@ -105,7 +106,10 @@ const buildTranscriptText = (segments: TranscriptSegment[]) =>
     .join(" ")
     .trim();
 
-export async function translateMeetingSegment(segment: TranscriptSegment): Promise<string | null> {
+const getMeetingTranslationKey = (segment: TranscriptSegment) =>
+  `${segment.source}\u0000${segment.timestamp ?? ""}\u0000${segment.text}`;
+
+async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<string | null> {
   const settings = getSettings();
   const isCloud = settings.translationMode === "openwhispr";
   const isSelfHosted =
@@ -148,6 +152,16 @@ export async function translateMeetingSegment(segment: TranscriptSegment): Promi
       uiLanguage: settings.uiLanguage,
     }),
   });
+}
+
+export function translateMeetingSegment(segment: TranscriptSegment): Promise<string | null> {
+  const key = getMeetingTranslationKey(segment);
+  const existing = meetingTranslationJobs.get(key);
+  if (existing) return existing;
+
+  const job = translateMeetingSegmentNow(segment);
+  meetingTranslationJobs.set(key, job);
+  return job;
 }
 
 function queueMeetingSegmentTranslation(segment: TranscriptSegment): void {
@@ -1387,6 +1401,15 @@ export interface StopRecordingResult {
 export async function stopRecording(): Promise<StopRecordingResult> {
   if (!isRecordingFlag) {
     return { diarizationSessionId: null };
+  }
+
+  const { recordingNoteId, segments } = useMeetingRecordingStore.getState();
+  // Keep already-completed real-time translations when the view swaps from
+  // the live store to the persisted meeting note.
+  if (recordingNoteId && segments.length > 0) {
+    await window.electronAPI?.updateNote(recordingNoteId, {
+      transcript: serializeTranscriptSegments(segments),
+    });
   }
 
   isRecordingFlag = false;
