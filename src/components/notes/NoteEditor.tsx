@@ -485,7 +485,7 @@ export default function NoteEditor({
         setIsDiarizing(false);
         setSpeakerMappings({});
         if (!isRecording) {
-          setViewMode("raw");
+          setViewMode(note.transcript ? "transcript" : "raw");
         }
         if (titleRef.current && titleRef.current.textContent !== note.title) {
           titleRef.current.textContent = note.title || "";
