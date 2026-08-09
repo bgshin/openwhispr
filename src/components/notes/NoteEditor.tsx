@@ -493,7 +493,7 @@ export default function NoteEditor({
         editorRef.current?.commands.focus();
       });
     }
-  }, [isRecording, note.id, note.title, scheduleUiUpdate]);
+  }, [isRecording, note.id, note.title, note.transcript, scheduleUiUpdate]);
 
   useEffect(() => {
     window.electronAPI?.getSpeakerMappings?.(note.id).then((mappings) => {
