@@ -141,7 +141,11 @@ async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<s
       isSelfHosted || provider === "custom"
         ? settings.translationCustomApiKey || undefined
         : undefined,
-    disableThinking: settings.translationDisableThinking,
+    // Meeting translation is a short, single-purpose operation. Keeping the
+    // response small and disabling reasoning avoids waiting for a full cleanup
+    // response after the transcription stream has already produced the text.
+    maxTokens: 256,
+    disableThinking: true,
     language: target,
     // Uses the shared dictionary hint list, so Korean and English names are
     // protected in both the source transcription and its translated companion.
@@ -157,9 +161,26 @@ async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<s
 export function translateMeetingSegment(segment: TranscriptSegment): Promise<string | null> {
   const key = getMeetingTranslationKey(segment);
   const existing = meetingTranslationJobs.get(key);
-  if (existing) return existing;
+  if (existing) {
+    logger.debug("Reusing in-flight meeting translation", {
+      source: segment.source,
+      characters: segment.text.length,
+    });
+    return existing;
+  }
 
-  const job = translateMeetingSegmentNow(segment);
+  const startedAt = Date.now();
+  logger.info("Meeting translation requested", {
+    source: segment.source,
+    characters: segment.text.length,
+  });
+  const job = translateMeetingSegmentNow(segment).finally(() => {
+    logger.info("Meeting translation settled", {
+      source: segment.source,
+      characters: segment.text.length,
+      elapsedMs: Date.now() - startedAt,
+    });
+  });
   meetingTranslationJobs.set(key, job);
   return job;
 }
