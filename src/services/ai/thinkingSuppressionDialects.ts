@@ -32,6 +32,13 @@ export function suppressThinking(
   providerKey: string,
   model: string
 ): void {
+  // GPT-5 models before 5.1 default to medium reasoning and reject "none".
+  // Minimal leaves room for the actual translated text in a bounded response.
+  if (providerKey === "openai" && /^gpt-5(?:-mini|-nano)?$/.test(model)) {
+    requestBody.reasoning_effort = "minimal";
+    return;
+  }
+
   if (providerKey === "gemini") {
     requestBody.reasoning_effort = "minimal";
     return;

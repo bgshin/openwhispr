@@ -205,5 +205,6 @@ export const serializeTranscriptSegments = (segments: TranscriptSegment[]) =>
       speakerLocked: segment.speakerLocked,
       speakerLockSource: segment.speakerLockSource,
       translatedText: segment.translatedText,
+      translationFailed: segment.translationFailed,
     }))
   );

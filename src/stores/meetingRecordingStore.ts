@@ -22,6 +22,8 @@ import logger from "../utils/logger";
 import {
   getMeetingTranslationTarget,
   isMeetingTranslationInTargetLanguage,
+  getMeetingTextScriptStats,
+  splitMeetingTranslationText,
 } from "../helpers/meetingBilingualTranslation";
 import { serializeTranscriptSegments } from "../utils/transcriptSpeakerState";
 import { isTranscriptionContextAllowed } from "./policyRules";
@@ -48,6 +50,8 @@ export interface TranscriptSegment {
   speakerLockSource?: TranscriptSpeakerLockSource;
   /** Korean <-> English companion text for the bilingual meeting view. */
   translatedText?: string;
+  /** The companion request ended unsuccessfully; do not leave this row loading forever. */
+  translationFailed?: boolean;
 }
 
 export const SIDE_PANEL_BREAKPOINT_PX = 1024;
@@ -101,7 +105,12 @@ const MEETING_MIC_PRIMARY_AUDIO_CONSTRAINTS = {
 
 const SPEAKER_IDENTIFICATION_RETENTION_MS = 30_000;
 const SYSTEM_SPEAKER_CARRY_FORWARD_MS = 8_000;
+// GPT-5 Mini can consume completion tokens on reasoning before emitting text.
+// Keep each bounded translation chunk generously provisioned so a complete
+// companion translation is preferred over a fast empty `length` response.
+const MEETING_TRANSLATION_MAX_TOKENS = 2048;
 const meetingTranslationJobs = new Map<string, Promise<string | null>>();
+const meetingTranslationChunkJobs = new Map<string, Promise<string>>();
 
 const buildTranscriptText = (segments: TranscriptSegment[]) =>
   segments
@@ -110,9 +119,17 @@ const buildTranscriptText = (segments: TranscriptSegment[]) =>
     .trim();
 
 const getMeetingTranslationKey = (segment: TranscriptSegment) =>
-  `${segment.source}\u0000${segment.timestamp ?? ""}\u0000${segment.text}`;
+  // Timestamps are normalized from epoch milliseconds to elapsed seconds when
+  // the note is persisted. Including them made the same live and saved segment
+  // miss the cache and re-translate during shutdown.
+  `${segment.source}\u0000${segment.text.trim()}`;
 
-async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<string | null> {
+type MeetingTranslationOrigin = "live" | "note-backfill";
+
+async function translateMeetingSegmentNow(
+  segment: TranscriptSegment,
+  origin: MeetingTranslationOrigin
+): Promise<string | null> {
   const settings = getSettings();
   const isCloud = settings.translationMode === "openwhispr";
   const isSelfHosted =
@@ -128,59 +145,126 @@ async function translateMeetingSegmentNow(segment: TranscriptSegment): Promise<s
   const target = getMeetingTranslationTarget(segment.text);
   const targetLabel = target === "en" ? "English" : "Korean";
   const dictionary = getDictionaryHintWords(settings);
-  const translatedText = await ReasoningService.processText(segment.text, model, null, {
-    provider,
-    lanUrl: isSelfHosted ? settings.translationRemoteUrl : undefined,
-    baseUrl:
-      settings.translationMode === "providers" && provider === "custom"
-        ? settings.translationCloudBaseUrl || undefined
-        : undefined,
-    customApiKey:
-      isSelfHosted || provider === "custom"
-        ? settings.translationCustomApiKey || undefined
-        : undefined,
-    // Meeting translation is a short, single-purpose operation. Keeping the
-    // response small and disabling reasoning avoids waiting for a full cleanup
-    // response after the transcription stream has already produced the text.
-    maxTokens: 256,
-    disableThinking: true,
-    language: target,
-    // The Responses endpoint may return no output text for an otherwise
-    // successful request, and its generic fallback is the source text. That
-    // looks like a Korean "translation" in the English column. Chat
-    // Completions reliably preserves this system-message-only transform.
-    preferChatCompletions: true,
-    requireCompleteOutput: true,
-    // Meeting columns have a fixed contract. Do not use the editable general
-    // translation prompt here: it may omit the target placeholder and let the
-    // model return a cleaned copy of the source in the opposite column.
-    systemPrompt: [
-      "You are a live Korean-English meeting interpreter.",
-      `Translate the user's input into ${targetLabel}.`,
-      `Return only the ${targetLabel} translation. Do not repeat, summarize, or explain the source text.`,
-      target === "en"
-        ? "Your output must not contain Korean sentences; transliterate Korean names when needed."
-        : "Your output must be written in Korean; translate English names only when a natural Korean form exists.",
-      dictionary.length
-        ? `Preserve these meeting terms and names accurately: ${dictionary.join(", ")}.`
-        : "",
-    ]
-      .filter(Boolean)
-      .join("\n"),
-  });
-  if (!isMeetingTranslationInTargetLanguage(translatedText, target)) {
-    throw new Error(`Meeting translation did not return ${targetLabel}`);
-  }
-  return translatedText;
+  const systemPrompt = [
+    "You are a live Korean-English meeting interpreter.",
+    `Translate the user's input into ${targetLabel}.`,
+    `Return only the ${targetLabel} translation. Do not repeat, summarize, or explain the source text.`,
+    target === "en"
+      ? "Your output must not contain Korean sentences; transliterate Korean names when needed."
+      : "Your output must be written in Korean; translate English names only when a natural Korean form exists.",
+    dictionary.length
+      ? `Preserve these meeting terms and names accurately: ${dictionary.join(", ")}.`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const chunks = splitMeetingTranslationText(segment.text);
+  logger.info(
+    "Meeting translation split",
+    {
+      origin,
+      source: segment.source,
+      timestamp: segment.timestamp ?? null,
+      ...getMeetingTextScriptStats(segment.text),
+      target,
+      provider: provider ?? "default",
+      model,
+      chunkCount: chunks.length,
+      chunkCharacters: chunks.map((chunk) => chunk.length),
+    },
+    "meeting"
+  );
+  const translateChunk = async (text: string, chunkIndex: number): Promise<string> => {
+    const chunkKey = `${target}\u0000${text}`;
+    const existing = meetingTranslationChunkJobs.get(chunkKey);
+    if (existing) return existing;
+    const maxTokens = MEETING_TRANSLATION_MAX_TOKENS;
+    logger.info(
+      "Meeting translation chunk dispatch",
+      {
+        origin,
+        source: segment.source,
+        timestamp: segment.timestamp ?? null,
+        chunkIndex: chunkIndex + 1,
+        chunkCount: chunks.length,
+        ...getMeetingTextScriptStats(text),
+        target,
+        provider: provider ?? "default",
+        model,
+        maxTokens,
+      },
+      "meeting"
+    );
+    const job = ReasoningService.processText(text, model, null, {
+      provider,
+      lanUrl: isSelfHosted ? settings.translationRemoteUrl : undefined,
+      baseUrl:
+        settings.translationMode === "providers" && provider === "custom"
+          ? settings.translationCloudBaseUrl || undefined
+          : undefined,
+      customApiKey:
+        isSelfHosted || provider === "custom"
+          ? settings.translationCustomApiKey || undefined
+          : undefined,
+      // Chunks bound the input. The output budget stays deliberately generous
+      // because GPT-5 Mini reserves completion tokens for reasoning as well.
+      maxTokens,
+      disableThinking: true,
+      language: target,
+      // The Responses endpoint may return no output text for an otherwise
+      // successful request, and its generic fallback is the source text. That
+      // looks like a Korean "translation" in the English column. Chat
+      // Completions reliably preserves this system-message-only transform.
+      preferChatCompletions: true,
+      telemetryTag: "meeting-translation",
+      systemPrompt,
+    });
+    meetingTranslationChunkJobs.set(chunkKey, job);
+    try {
+      const translatedText = await job;
+      const matchesTarget = isMeetingTranslationInTargetLanguage(translatedText, target);
+      logger.info(
+        "Meeting translation chunk response",
+        {
+          origin,
+          source: segment.source,
+          timestamp: segment.timestamp ?? null,
+          chunkIndex: chunkIndex + 1,
+          chunkCount: chunks.length,
+          target,
+          matchesTarget,
+          ...getMeetingTextScriptStats(translatedText),
+        },
+        "meeting"
+      );
+      if (!matchesTarget) {
+        throw new Error(`Meeting translation did not return ${targetLabel}`);
+      }
+      return translatedText;
+    } catch (error) {
+      meetingTranslationChunkJobs.delete(chunkKey);
+      throw error;
+    }
+  };
+
+  const translations = await Promise.all(
+    chunks.map((chunk, chunkIndex) => translateChunk(chunk, chunkIndex))
+  );
+  return translations.join(" ");
 }
 
-export function translateMeetingSegment(segment: TranscriptSegment): Promise<string | null> {
+export function translateMeetingSegment(
+  segment: TranscriptSegment,
+  origin: MeetingTranslationOrigin = "live"
+): Promise<string | null> {
   const key = getMeetingTranslationKey(segment);
   const existing = meetingTranslationJobs.get(key);
   if (existing) {
     logger.debug("Reusing in-flight meeting translation", {
       source: segment.source,
       characters: segment.text.length,
+      origin,
+      timestamp: segment.timestamp ?? null,
     });
     return existing;
   }
@@ -189,32 +273,43 @@ export function translateMeetingSegment(segment: TranscriptSegment): Promise<str
   logger.info("Meeting translation requested", {
     source: segment.source,
     characters: segment.text.length,
+    origin,
+    timestamp: segment.timestamp ?? null,
   });
-  const job = translateMeetingSegmentNow(segment).finally(() => {
+  const job = translateMeetingSegmentNow(segment, origin).finally(() => {
     logger.info("Meeting translation settled", {
       source: segment.source,
       characters: segment.text.length,
+      origin,
+      timestamp: segment.timestamp ?? null,
       elapsedMs: Date.now() - startedAt,
     });
   });
   meetingTranslationJobs.set(key, job);
+  void job.catch(() => {
+    // A later manual retry should be allowed after a genuine API failure.
+    if (meetingTranslationJobs.get(key) === job) meetingTranslationJobs.delete(key);
+  });
   return job;
 }
 
 function queueMeetingSegmentTranslation(segment: TranscriptSegment): void {
-  void translateMeetingSegment(segment)
+  // Recording can stop before this asynchronous request resolves. Keep the
+  // original note target so the completed companion is persisted instead of
+  // causing the reopened note to issue a second translation request.
+  const noteId = useMeetingRecordingStore.getState().recordingNoteId;
+  void translateMeetingSegment(segment, "live")
     .then((translatedText) => {
       if (!translatedText || translatedText === segment.text) return;
       const next = useMeetingRecordingStore
         .getState()
         .segments.map((current) =>
           current.id === segment.id && current.text === segment.text
-            ? { ...current, translatedText }
+            ? { ...current, translatedText, translationFailed: false }
             : current
         );
       segmentsRefValue = next;
       useMeetingRecordingStore.setState({ segments: next });
-      const noteId = useMeetingRecordingStore.getState().recordingNoteId;
       if (noteId) {
         // Persist each completed companion so translations that finish after
         // recording stops remain available when the meeting note is reopened.
@@ -223,13 +318,27 @@ function queueMeetingSegmentTranslation(segment: TranscriptSegment): void {
         });
       }
     })
-    .catch((error: Error) =>
+    .catch((error: Error) => {
+      const next = useMeetingRecordingStore
+        .getState()
+        .segments.map((current) =>
+          current.id === segment.id && current.text === segment.text
+            ? { ...current, translationFailed: true }
+            : current
+        );
+      segmentsRefValue = next;
+      useMeetingRecordingStore.setState({ segments: next });
+      if (noteId) {
+        void window.electronAPI?.updateNote(noteId, {
+          transcript: serializeTranscriptSegments(next),
+        });
+      }
       logger.warn(
         "Meeting segment translation failed; retaining the original transcript",
         { error: error.message },
         "meeting"
-      )
-    );
+      );
+    });
 }
 
 const getSpeakerNumericIndex = (speakerId?: string): number | null => {

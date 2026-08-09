@@ -107,6 +107,28 @@ test("unlisted providers keep the legacy reasoning_effort none plus chat_templat
   });
 });
 
+test("pre-5.1 OpenAI GPT-5 uses minimal reasoning instead of unsupported none", async () => {
+  const { suppressThinking } = await load();
+
+  const body = {};
+  suppressThinking(body, "openai", "gpt-5-mini");
+
+  assert.deepEqual(body, { reasoning_effort: "minimal" });
+});
+
+test("GPT-5 Mini gets minimal reasoning when its provider setting is unspecified", async () => {
+  const { applyThinkingSuppression } = await import(
+    "../../src/services/ai/thinkingSuppression.ts"
+  );
+
+  const body = {};
+  // The OpenAI transport derives this value when a model is selected without
+  // an explicit provider in settings.
+  applyThinkingSuppression(body, "gpt-5-mini", "openai", { disableThinking: true });
+
+  assert.deepEqual(body, { reasoning_effort: "minimal" });
+});
+
 test("mistral gets reasoning_effort none and never chat_template_kwargs", async () => {
   const { suppressThinking } = await load();
 

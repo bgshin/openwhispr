@@ -124,9 +124,19 @@ async function detectServerType(base: string): Promise<void> {
 export const openaiProvider: InferenceProvider = {
   id: "openai",
   async call({ text, model, agentName, config, ctx }) {
-    const resolvedProvider = config.provider || getSettings().cleanupProvider || "";
+    const resolvedProvider =
+      config.provider || config.resolvedProvider || getSettings().cleanupProvider || "";
     const isCustomProvider = resolvedProvider === "custom";
     const isOpenRouter = resolvedProvider === "openrouter";
+    // This handler is selected after model routing. A blank configured provider
+    // means the model's native route, which is OpenAI here—not an unknown
+    // provider. Passing the actual transport name is important for GPT-5's
+    // `reasoning_effort: "minimal"` request dialect.
+    const suppressionProvider = isOpenRouter
+      ? "openrouter"
+      : isCustomProvider
+        ? "custom"
+        : "openai";
 
     logger.logReasoning("OPENAI_START", {
       model,
@@ -216,11 +226,27 @@ export const openaiProvider: InferenceProvider = {
             if (!config.systemPrompt && model.includes("gpt-oss")) {
               requestBody.reasoning_effort = "low";
             }
-            applyThinkingSuppression(requestBody, model, resolvedProvider, config, openAiBase);
+            applyThinkingSuppression(requestBody, model, suppressionProvider, config, openAiBase);
           }
 
           if (apiConfig.supportsTemperature) {
             requestBody.temperature = config.temperature ?? (config.systemPrompt ? 0.3 : 0);
+          }
+
+          if (config.telemetryTag === "meeting-translation") {
+            logger.info(
+              "Meeting translation API request",
+              {
+                endpoint,
+                apiFormat: type,
+                model,
+                targetLanguage: config.language,
+                maxOutputTokens: maxTokens,
+                reasoningEffort: requestBody.reasoning_effort ?? null,
+                hasSystemPrompt: !!config.systemPrompt,
+              },
+              "meeting"
+            );
           }
 
           const res = await fetch(endpoint, {
@@ -307,6 +333,35 @@ export const openaiProvider: InferenceProvider = {
       usage: response.usage,
     });
 
+    if (config.telemetryTag === "meeting-translation") {
+      const choices = Array.isArray(response?.choices) ? response.choices : [];
+      logger.info(
+        "Meeting translation API response metadata",
+        {
+          format: isResponsesApi ? "responses" : isChatCompletions ? "chat_completions" : "unknown",
+          status: response?.status ?? null,
+          outputTextLength: typeof response?.output_text === "string" ? response.output_text.length : 0,
+          choices: choices.map((choice: any) => {
+            const message = choice?.message ?? choice?.delta ?? {};
+            const content = message.content;
+            return {
+              finishReason: choice?.finish_reason ?? null,
+              messageKeys: Object.keys(message),
+              contentKind: Array.isArray(content) ? "array" : typeof content,
+              contentLength: typeof content === "string" ? content.length : 0,
+              contentParts: Array.isArray(content)
+                ? content.map((part: any) => ({
+                    type: part?.type ?? null,
+                    textLength: typeof part?.text === "string" ? part.text.length : 0,
+                  }))
+                : [],
+            };
+          }),
+        },
+        "meeting"
+      );
+    }
+
     let responseText = "";
 
     if (isResponsesApi) {
@@ -364,6 +419,9 @@ export const openaiProvider: InferenceProvider = {
     });
 
     if (!responseText) {
+      if (config.telemetryTag === "meeting-translation") {
+        throw new Error("Meeting translation API response contained no output text");
+      }
       if (config.requireCompleteOutput) {
         throw new Error("Model returned an empty selection edit");
       }

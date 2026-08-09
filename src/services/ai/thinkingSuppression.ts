@@ -20,9 +20,14 @@ export function applyThinkingSuppression(
 
   if (config.disableThinking !== true) return;
 
+  // GPT-5 models before 5.1 default to medium reasoning and do not accept
+  // "none". They are absent from the legacy supportsThinking metadata, but
+  // still need the provider-specific minimal setting below.
+  const isPre51Gpt5 = providerKey === "openai" && /^gpt-5(?:-mini|-nano)?$/.test(model);
+
   const localModel = getLocalModel(model);
   const knownModel = cloudModel || localModel;
-  if (knownModel && !knownModel.supportsThinking) return;
+  if (knownModel && !knownModel.supportsThinking && !isPre51Gpt5) return;
 
   suppressThinking(requestBody, providerKey, model);
 }

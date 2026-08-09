@@ -775,6 +775,7 @@ export function MeetingTranscriptChat({
           const sourceIsKorean = isKoreanText(segment.text);
           const koreanText = sourceIsKorean ? segment.text : segment.translatedText;
           const englishText = sourceIsKorean ? segment.translatedText : segment.text;
+          const translationFailed = segment.translationFailed;
 
           const activeName = speakerMappings?.[segment.speaker!] || segment.speakerName;
           const matchedProfile =
@@ -855,7 +856,10 @@ export function MeetingTranscriptChat({
                         !text && "text-muted-foreground/50 italic"
                       )}
                     >
-                      {text || t("common.loading")}
+                      {text ||
+                        (translationFailed
+                          ? t("common.error", { defaultValue: "Translation unavailable" })
+                          : t("common.loading"))}
                     </div>
                   ))}
                 </div>

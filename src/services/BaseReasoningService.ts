@@ -12,10 +12,14 @@ export interface ReasoningConfig {
   baseUrl?: string;
   customApiKey?: string;
   provider?: string;
+  /** Internal dispatch result. Keeps transport-specific request shaping aligned with model routing. */
+  resolvedProvider?: string;
   disableThinking?: boolean;
   language?: string;
   /** Use Chat Completions when a deterministic system-message transform is required. */
   preferChatCompletions?: boolean;
+  /** Enables metadata-only diagnostic logs for a bounded request class. */
+  telemetryTag?: string;
   requireCompleteOutput?: boolean;
   requiresAgent?: boolean;
 }

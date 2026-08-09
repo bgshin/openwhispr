@@ -670,10 +670,17 @@ class LiveSpeakerIdentifier {
       }
     }
 
-    return bestSimilarity >= MATCH_THRESHOLD &&
-      bestSimilarity - secondBestSimilarity >= MATCH_MARGIN
-      ? bestProfile
-      : null;
+    const matched =
+      bestSimilarity >= MATCH_THRESHOLD && bestSimilarity - secondBestSimilarity >= MATCH_MARGIN;
+    debugLogger.info("Live speaker profile match diagnostics", {
+      profileCount: profiles.length,
+      bestSimilarity: Number(bestSimilarity.toFixed(3)),
+      secondBestSimilarity: Number(secondBestSimilarity.toFixed(3)),
+      threshold: MATCH_THRESHOLD,
+      margin: MATCH_MARGIN,
+      matched,
+    });
+    return matched ? bestProfile : null;
   }
 
   _resolveSpeakerForEmbedding(embedding, options = {}) {

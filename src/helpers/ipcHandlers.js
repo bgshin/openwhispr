@@ -6076,6 +6076,14 @@ class IPCHandlers {
           Object.entries(mic).map(([speakerId, state]) => [`mic_${speakerId}`, state])
         ),
       };
+      debugLogger.info("Meeting live speaker diagnostics", {
+        noteId: meetingNoteId,
+        systemSpeakerCount: Object.keys(system || {}).length,
+        micSpeakerCount: Object.keys(mic || {}).length,
+        savedEmbeddingCount: Object.values(meetingLiveSpeakerState).filter(
+          (state) => Array.isArray(state?.embedding) && state.embedding.length > 0
+        ).length,
+      });
 
       // Keep the live voice embedding with the note even when the final
       // offline diarization pass has no usable segments. A later manual tag
@@ -6096,12 +6104,21 @@ class IPCHandlers {
     const startLiveSpeakerIdentification = async (win, systemAudioMode) => {
       await stopLiveSpeakerIdentification();
 
-      if (!liveSpeakerIdentifier.isAvailable()) {
+      const systemAvailable = liveSpeakerIdentifier.isAvailable();
+      const micAvailable = micLiveSpeakerIdentifier.isAvailable();
+      const profileCount = getLiveSpeakerProfiles().length;
+      if (!systemAvailable) {
+        debugLogger.warn("Meeting live speaker identification unavailable", {
+          systemAvailable,
+          micAvailable,
+          profileCount,
+        });
         return false;
       }
 
       const diarizationEnabled = resolveDiarizationEnabled();
       if (!diarizationEnabled) {
+        debugLogger.info("Meeting live speaker identification disabled", { profileCount });
         return false;
       }
 
@@ -6174,6 +6191,17 @@ class IPCHandlers {
       );
       const [systemStarted, micStarted] = await Promise.all([startSystem, startMic]);
       const started = systemStarted || micStarted;
+
+      debugLogger.info("Meeting live speaker identification started", {
+        systemAudioMode,
+        systemAvailable,
+        micAvailable,
+        systemStarted,
+        micStarted,
+        profileCount,
+        expectedSystemSpeakers: resolveSessionMaxSpeakers(),
+        expectedMicSpeakers: resolveMicSessionMaxSpeakers(),
+      });
 
       if (started) {
         meetingLiveSpeakerActive = true;
@@ -7062,8 +7090,6 @@ class IPCHandlers {
         flushPendingMeetingMicChunks(true);
         await stopMeetingAec();
 
-        const liveSpeakerState = await stopLiveSpeakerIdentification().catch(() => null);
-
         const diarizationSessionId = `diar-${Date.now()}`;
         const diarizationWin = meetingLocalWin || this.windowManager.controlPanelWindow;
 
@@ -7078,6 +7104,9 @@ class IPCHandlers {
             debugLogger.error("Local meeting final transcription failed", { error: err.message });
           }
           flushPendingMicFinals(true);
+          // Final local STT segments must exist before the VAD identifier
+          // finalizes its current speech window and assigns the last speaker.
+          const liveSpeakerState = await stopLiveSpeakerIdentification().catch(() => null);
           const { diarizationPcmPath, diarizationSegments, diarizationStartedAt } =
             await captureMeetingDiarizationState();
           const transcript =
@@ -7103,6 +7132,9 @@ class IPCHandlers {
         }
 
         const results = await disconnectMeetingStreaming({ flushPending: true });
+        // Realtime disconnect flushes final STT events. Finalize diarization
+        // afterwards so the last transcript segment can receive that speaker.
+        const liveSpeakerState = await stopLiveSpeakerIdentification().catch(() => null);
         const { diarizationPcmPath, diarizationSegments, diarizationStartedAt } =
           await captureMeetingDiarizationState();
         const transcript =
@@ -9813,6 +9845,14 @@ class IPCHandlers {
     (async () => {
       let tmpWav = null;
       try {
+        const rawBytes = fs.existsSync(rawPcmPath) ? fs.statSync(rawPcmPath).size : 0;
+        debugLogger.info("Meeting offline diarization diagnostics", {
+          sessionId,
+          rawBytes,
+          approximateAudioSeconds: Math.round((rawBytes / (24_000 * 2)) * 100) / 100,
+          transcriptSegmentCount: transcriptSegments.length,
+          liveSpeakerCount: Object.keys(liveSpeakerState || {}).length,
+        });
         tmpWav = await this.diarizationManager.convertRawPcmToWav(rawPcmPath, 24000);
         const observedSpeakerIds = new Set(
           transcriptSegments
@@ -9838,6 +9878,12 @@ class IPCHandlers {
           tmpWav,
           numSpeakers > 0 ? { numSpeakers } : {}
         );
+        debugLogger.info("Meeting offline diarization result", {
+          sessionId,
+          segmentCount: diarizationSegments.length,
+          uniqueSpeakerCount: new Set(diarizationSegments.map((segment) => segment.speaker)).size,
+          requestedSpeakerCount: numSpeakers,
+        });
         if (cap != null) {
           diarizationSegments = this.diarizationManager.capSpeakerClusters(
             diarizationSegments,

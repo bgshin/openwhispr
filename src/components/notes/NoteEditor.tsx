@@ -590,25 +590,32 @@ export default function NoteEditor({
   // Older meeting notes predate the bilingual fields. Translate those saved
   // segments on first viewing instead of rendering an empty language column.
   useEffect(() => {
-    const missing = displaySegments.filter((segment) => !segment.translatedText?.trim());
+    const missing = displaySegments.filter(
+      (segment) => !segment.translatedText?.trim() && !segment.translationFailed
+    );
     if (isRecording || missing.length === 0) return;
     let cancelled = false;
 
     void Promise.all(
       missing.map(async (segment) => ({
         id: segment.id,
-        text: await translateMeetingSegment(segment).catch(() => null),
+        text: await translateMeetingSegment(segment, "note-backfill").catch(() => null),
       }))
     ).then((results) => {
       if (cancelled) return;
       const translations = new Map(
         results.filter((result) => result.text).map((result) => [result.id, result.text!])
       );
-      if (translations.size === 0) return;
+      const failedIds = new Set(
+        results.filter((result) => !result.text).map((result) => result.id)
+      );
+      if (translations.size === 0 && failedIds.size === 0) return;
       const next = displaySegments.map((segment) =>
         translations.has(segment.id)
-          ? { ...segment, translatedText: translations.get(segment.id) }
-          : segment
+          ? { ...segment, translatedText: translations.get(segment.id), translationFailed: false }
+          : failedIds.has(segment.id)
+            ? { ...segment, translationFailed: true }
+            : segment
       );
       void persistDisplaySegments(next);
     });

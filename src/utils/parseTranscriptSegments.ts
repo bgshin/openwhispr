@@ -17,6 +17,7 @@ export function parseTranscriptSegments(raw: string): TranscriptSegment[] {
       speakerLocked?: TranscriptSegment["speakerLocked"];
       speakerLockSource?: TranscriptSegment["speakerLockSource"];
       translatedText?: string;
+      translationFailed?: boolean;
     }>;
     return normalizeTranscriptSegments(
       parsed.map((s, i) => ({
@@ -33,6 +34,7 @@ export function parseTranscriptSegments(raw: string): TranscriptSegment[] {
         speakerLocked: s.speakerLocked,
         speakerLockSource: s.speakerLockSource,
         translatedText: s.translatedText,
+        translationFailed: s.translationFailed,
       }))
     );
   } catch (e) {

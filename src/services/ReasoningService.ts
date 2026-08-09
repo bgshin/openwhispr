@@ -394,7 +394,10 @@ class ReasoningService extends BaseReasoningService {
         text,
         model: trimmedModel,
         agentName,
-        config,
+        // The selected handler is the source of truth when a caller relies on
+        // model-based routing (for example a meeting with `gpt-5-mini` and no
+        // explicit provider setting). Preserve it for request dialects.
+        config: { ...config, resolvedProvider: providerId },
         ctx: this.providerContext,
       });
 
